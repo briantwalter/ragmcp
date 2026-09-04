@@ -9,7 +9,7 @@ an embedded Chroma database and exposes them through one MCP tool.
 - OpenAI creates embeddings for new or changed chunks.
 - Embedded Chroma persists the index locally and performs cosine retrieval.
 - Stable chunk IDs prevent duplicate records and unnecessary re-embedding.
-- Startup synchronization adds changed chunks and deletes stale chunks.
+- Explicit reindexing adds changed chunks and deletes stale chunks.
 - The LLM answers only from retrieved context and cites source filenames inline.
 - FastMCP exposes the service over stdio; no separate Chroma server is required.
 
@@ -30,23 +30,23 @@ flowchart LR
 
     User["ChatGPT or MCP client"] -->|starts local process| Server["MCP server over stdio"]
     Server -->|ask_faq| Query["RAG query"]
-    Query --> Sync
     Chroma --> Query
     Query --> Result["answer + sources"]
     Result --> Server
     Server --> User
 ```
 
-You can explicitly run `--reindex` after changing source files, or simply make
-an `ask_faq` request. Both paths use the same incremental synchronization
-logic. The MCP client starts and communicates with the server over stdio; Chroma
-runs inside that local Python process and does not require a separate service.
+Run `--reindex` initially and whenever source files change. Query requests read
+the existing index directly, avoiding a filesystem scan and synchronization on
+the interactive path. The MCP client starts and communicates with the server
+over stdio; Chroma runs inside that local Python process and does not require a
+separate service.
 
 ## Internal flow
 
 ```mermaid
 flowchart TD
-    Start["Reindex or ask_faq"] --> Discover["Discover sorted Markdown files"]
+    Reindex["Explicit --reindex"] --> Discover["Discover sorted Markdown files"]
     Discover --> Chunk["Create paragraph-aware ~200 character chunks"]
     Chunk --> IDs["Hash filename + per-file position + content"]
     IDs --> Compare{"Compare current IDs with stored IDs"}
@@ -59,9 +59,12 @@ flowchart TD
     Delete --> Ready
     Reuse --> Ready
 
-    Ready --> Mode{"Operation"}
-    Mode -->|reindex| Stats["Return synchronization statistics"]
-    Mode -->|ask_faq| EmbedQuery["Embed question"]
+    Ready --> Stats["Return synchronization statistics"]
+
+    Ask["ask_faq"] --> Existing{"Index contains chunks?"}
+    Existing -->|no| Error["Return actionable --reindex error"]
+    Existing -->|yes| EmbedQuery["Embed question"]
+    Ready -. persisted for later queries .-> Existing
     EmbedQuery --> Retrieve["Retrieve top-k chunks by cosine distance"]
     Retrieve --> Context["Build filename-labelled context"]
     Context --> LLM["Generate grounded answer with inline citations"]
@@ -70,7 +73,8 @@ flowchart TD
 
 Changing `EMBED_MODEL` or `CHUNK_SIZE` recreates the collection so incompatible
 vectors cannot be mixed. Normal source changes remain incremental: unchanged
-chunks are reused, new content is embedded, and stale content is removed.
+chunks are reused, new content is embedded, and stale content is removed when
+`--reindex` runs.
 
 ## Setup
 
@@ -94,8 +98,8 @@ export TOP_K_DEFAULT=4
 ```
 
 Changing the embedding model or chunk size recreates the collection to prevent
-mixing incompatible vectors. Editing, adding, deleting, or renaming an FAQ is
-synchronized on the next request.
+mixing incompatible vectors. Run `python rag_core.py --reindex` after changing
+the configuration or editing, adding, deleting, or renaming an FAQ.
 
 ## Run
 
@@ -183,4 +187,5 @@ For an end-to-end demo, ask:
 2. `How do I enable SSO?`
 3. `What should an employee know about PTO and equity?`
 
-The first request creates `.chroma/`; later runs reuse its embeddings.
+Run `python rag_core.py --reindex` before the first request. Later requests read
+the persisted `.chroma/` index without rescanning the FAQ directory.

@@ -218,12 +218,6 @@ def reindex() -> Dict[str, int]:
     return stats
 
 
-def _preload() -> Collection:
-    """Synchronize the FAQ corpus and return the persistent collection."""
-    collection, _ = _sync_index()
-    return collection
-
-
 def _generate_answer(context: str, question: str, sources: Sequence[str]) -> str:
     """Generate a context-grounded answer with inline source citations."""
     response = client.chat.completions.create(
@@ -267,8 +261,13 @@ def ask_faq_core(question: str, top_k: int = TOP_K_DEFAULT) -> Dict[str, object]
     if not 1 <= top_k <= 10:
         raise ValueError("top_k must be between 1 and 10")
 
-    collection = _preload()
-    result_count = min(top_k, collection.count())
+    collection = _get_collection()
+    chunk_count = collection.count()
+    if chunk_count == 0:
+        raise RuntimeError(
+            "FAQ index is empty; run python rag_core.py --reindex before querying"
+        )
+    result_count = min(top_k, chunk_count)
 
     results = collection.query(
         query_embeddings=[_embed_query(q)],

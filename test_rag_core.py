@@ -54,7 +54,7 @@ class RagCoreTests(unittest.TestCase):
         self.assertEqual(first, rag_core._chunk_id("one.md", 0, "same content"))
         self.assertNotEqual(first, rag_core._chunk_id("two.md", 0, "same content"))
 
-    def test_preload_only_embeds_new_chunks_and_deletes_stale(self):
+    def test_reindex_only_embeds_new_chunks_and_deletes_stale(self):
         collection = FakeCollection()
         collection.ids = ["stale"]
         records = [
@@ -70,7 +70,7 @@ class RagCoreTests(unittest.TestCase):
                 side_effect=lambda texts: [[0.1, 0.2] for _ in texts],
             ),
         ):
-            rag_core._preload()
+            rag_core.reindex()
 
         self.assertEqual(collection.deleted, ["stale"])
         self.assertEqual(len(collection.upserts), 1)
@@ -79,7 +79,8 @@ class RagCoreTests(unittest.TestCase):
     def test_ask_faq_returns_exact_contract_and_retrieval_order(self):
         collection = FakeCollection()
         with (
-            patch.object(rag_core, "_preload", return_value=collection),
+            patch.object(rag_core, "_get_collection", return_value=collection),
+            patch.object(rag_core, "_load_and_chunk_faqs") as scan_sources,
             patch.object(rag_core, "_embed_query", return_value=[0.1, 0.2]),
             patch.object(rag_core, "_generate_answer", return_value="Answer"),
         ):
@@ -87,6 +88,19 @@ class RagCoreTests(unittest.TestCase):
 
         self.assertEqual(list(result), ["answer", "sources"])
         self.assertEqual(result["sources"], ["faq_auth.md", "faq_sso.md"])
+        scan_sources.assert_not_called()
+
+    def test_ask_faq_requires_an_existing_index(self):
+        collection = FakeCollection()
+        collection.count = lambda: 0
+        with (
+            patch.object(rag_core, "_get_collection", return_value=collection),
+            patch.object(rag_core, "_embed_query") as embed_query,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "--reindex"):
+                rag_core.ask_faq_core("How?", top_k=4)
+
+        embed_query.assert_not_called()
 
     def test_invalid_inputs_are_rejected(self):
         for question, top_k in [("", 4), ("question", 0), ("question", 11)]:
